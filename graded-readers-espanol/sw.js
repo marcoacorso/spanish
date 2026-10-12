@@ -1,5 +1,5 @@
 // Service worker: guarda a app para funcionar offline. Os episódios ficam no IndexedDB, não aqui.
-const CACHE = 'leitor-v1.1.0';
+const CACHE = 'leitor-v1.1.1';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'creator.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png', 'icons/maskable-512.png'];
 
@@ -22,10 +22,16 @@ self.addEventListener('fetch', e => {
     return;
   }
   if (url.origin !== location.origin) return;
-  // app: cache primeiro, atualiza em segundo plano
+  // app: rede primeiro (para receber logo as atualizações); sem rede usa a cópia guardada
   e.respondWith(caches.open(CACHE).then(async c => {
-    const hit = await c.match(e.request, { ignoreSearch: true }) || (e.request.mode === 'navigate' ? await c.match('index.html') : null);
-    const net = fetch(e.request).then(r => { if (r.ok) c.put(e.request, r.clone()); return r; }).catch(() => null);
-    return hit || (await net) || new Response('Offline', { status: 503 });
+    try {
+      // no metro a rede pode estar lenta: ao fim de 3 s usa a cópia guardada
+      const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 3000);
+      const r = await fetch(e.request, { cache: 'no-cache', signal: ctl.signal }).finally(() => clearTimeout(t));
+      if (r.ok) c.put(e.request, r.clone());
+      return r;
+    } catch (err) {
+      return (await c.match(e.request, { ignoreSearch: true })) || (e.request.mode === 'navigate' ? await c.match('index.html') : null) || new Response('Offline', { status: 503 });
+    }
   }));
 });

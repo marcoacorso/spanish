@@ -65,7 +65,7 @@ const EP_TOOL = {
 
 function buildPrompt(variant, hint) {
   const v = variant === 'pt-BR' ? 'português do Brasil' : 'português de Portugal';
-  return `És um professor de línguas a preparar um graded reader para um falante nativo de português. O material acima contém uma história (normalmente em espanhol). Usa a ferramenta save_episode com o resultado.
+  return `És um professor de línguas a preparar um graded reader para um falante nativo de português. O material acima contém uma história (normalmente em espanhol). Responde APENAS chamando a ferramenta save_episode com o resultado completo — não escrevas texto fora da ferramenta.
 
 Regras:
 1. paragraphs — copia o texto da história EXATAMENTE como está no original: as mesmas palavras, pontuação, acentos e reticências. Não resumas, não corrijas, não acrescentes nada. Deixa de fora cabeçalhos, endereços de sites, números de página, o nome da lição/episódio e títulos traduzidos para inglês. O título da história também fica de fora dos parágrafos. Mantém a divisão em parágrafos do original e divide cada parágrafo em frases; uma exclamação ou pergunta curta (ex.: «¡Cuatro días!») é uma frase própria.
@@ -136,7 +136,7 @@ async function askClaude({ key, model, pdfB64, text, variant, hint, onProgress }
   content.push({ type: 'text', text: buildPrompt(variant, hint) });
   return claudeRequest(key, {
     model, max_tokens: 24000, stream: true,
-    tools: [EP_TOOL], tool_choice: { type: 'tool', name: 'save_episode' },
+    tools: [EP_TOOL], tool_choice: { type: 'auto' },
     messages: [{ role: 'user', content }],
   }, onProgress);
 }
