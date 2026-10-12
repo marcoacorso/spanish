@@ -1,6 +1,6 @@
 // Service worker: guarda a app para funcionar offline. Os episódios ficam no IndexedDB, não aqui.
-const CACHE = 'leitor-v1.0.1';
-const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest',
+const CACHE = 'leitor-v1.1.0';
+const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'creator.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png', 'icons/maskable-512.png'];
 
 self.addEventListener('install', e => {

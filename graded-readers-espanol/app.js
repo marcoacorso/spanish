@@ -1,6 +1,6 @@
 'use strict';
 /* Leitor — graded readers com áudio, offline. Sem servidor: tudo fica no dispositivo (IndexedDB). */
-const VERSION = '1.0.1';
+const VERSION = '1.1.0';
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -43,7 +43,7 @@ const S = {
   episodes: [],          // metadata + content (sem áudio)
   progress: {},          // epId -> {pos, maxIdx, done, last}
   vocab: {},             // gkey -> {box, due}
-  settings: { theme: 'auto', fs: 20, tr: false, listen: false, gloss: true, follow: true, speed: 2, lastTab: 'ler' },
+  settings: { theme: 'auto', fs: 20, tr: false, listen: false, gloss: true, follow: true, speed: 2, lastTab: 'ler', model: 'claude-sonnet-5-5', variant: 'pt-PT', lastSeries: '' },
 };
 let saveTimers = {};
 function saveKV(key, delay = 400) {
@@ -163,6 +163,7 @@ function route() {
   const h = location.hash.replace(/^#\/?/, '').split('?')[0];
   const [a, b] = h.split('/');
   if (a === 'ep' && b) return viewReader(decodeURIComponent(b));
+  if (a === 'new') return viewNew();
   if (a === 'vocab') return viewVocab();
   if (a === 'cards') return viewCards();
   if (a === 'settings') return viewSettings();
@@ -182,7 +183,7 @@ function viewLibrary() {
     body = `<div class="card empty">
       <div class="big">A tua biblioteca está vazia</div>
       <p class="muted">Importa um ficheiro de episódio (.json). Fica guardado neste dispositivo e funciona sem internet.</p>
-      <p><button class="btn primary" data-act="import">${icons.plus} Importar episódio</button></p>
+      <p style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap"><a class="btn primary" href="#/new">${icons.plus} Novo episódio (PDF + MP3)</a><button class="btn" data-act="import">Importar .json</button></p>
       <p class="muted" style="font-size:13px">No PC também podes arrastar o ficheiro para esta janela.</p>
     </div>`;
   } else {
@@ -202,7 +203,7 @@ function viewLibrary() {
   }
   $('#app').innerHTML = `<div class="wrap">
     <div class="top"><div><div class="kicker">Graded readers</div><h1>Biblioteca</h1></div>
-    ${eps.length ? `<button class="btn" data-act="import">${icons.plus} Importar</button>` : ''}</div>
+    ${eps.length ? `<div style="display:flex;gap:8px"><a class="btn primary" href="#/new">${icons.plus} Novo</a><button class="btn" data-act="import">Importar</button></div>` : ''}</div>
     ${body}</div>${bottomNav('lib')}`;
   $('#app').onclick = e => {
     const ep = e.target.closest('[data-ep]'); if (ep) location.hash = '#/ep/' + encodeURIComponent(ep.dataset.ep);
@@ -261,6 +262,11 @@ async function viewReader(id) {
         <button class="tg" data-s="listen">Só ouvir</button>
         <button class="tg" data-s="gloss">Sublinhados</button>
         <button class="tg" data-s="follow">Seguir áudio</button>
+        <button class="tg" id="bAdjust">Ajustar tempos</button>
+      </div>
+      <div class="adjbar" id="adjbar" hidden>
+        <p><b>Ajustar tempos.</b> Põe o áudio a tocar e toca em cada frase no momento em que ela começa. Podes recuar no áudio e repetir. No fim, guarda.</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" id="adjSave">Guardar</button><button class="btn" id="adjCancel">Cancelar</button><button class="btn" id="adjStart">Ouvir do início</button></div>
       </div>
       <div class="card"><div class="story">${story}</div></div>
       <p class="hint">Toca numa frase para ouvir a partir daí. Toca numa palavra sublinhada para ver o significado (roxo = falso amigo).</p>
@@ -342,7 +348,8 @@ async function viewReader(id) {
   const idxAt = t => { let k = -1; for (let n = 0; n < starts.length; n++) if (t >= starts[n] - 0.05) k = n; return k; };
   const setCur = k => {
     if (k === cur) return;
-    if (cur >= 0 && sEls[cur]) sEls[cur].classList.remove('cur');
+    if (cur === -2) sEls.forEach(x => x.classList.remove('cur'));
+    else if (cur >= 0 && sEls[cur]) sEls[cur].classList.remove('cur');
     cur = k;
     if (k >= 0 && sEls[k]) {
       sEls[k].classList.add('cur');
@@ -395,6 +402,30 @@ async function viewReader(id) {
     for (const [a, f] of Object.entries(h)) try { navigator.mediaSession.setActionHandler(a, f); } catch (e) {}
   }
 
+  // ajustar tempos
+  let adjust = false, backup = null;
+  const setAdjust = on => {
+    adjust = on; document.body.classList.toggle('adjusting', on);
+    $('#adjbar').hidden = !on; $('#bAdjust').setAttribute('aria-pressed', on);
+    if (on) { backup = starts.slice(); loop = false; $('#pLoop').classList.remove('on'); }
+  };
+  $('#bAdjust').onclick = () => setAdjust(!adjust);
+  $('#adjCancel').onclick = () => { starts.splice(0, starts.length, ...backup); for (let k = 0; k < starts.length; k++) ends[k] = k < starts.length - 1 ? starts[k + 1] : (ep.end || 1e9); setAdjust(false); toast('Alterações descartadas'); };
+  $('#adjStart').onclick = () => { au.currentTime = 0; au.play(); };
+  $('#adjSave').onclick = async () => {
+    ep.starts = starts.slice(); await db.put('episodes', ep);
+    setAdjust(false); toast('Tempos guardados');
+  };
+  const markStart = i => {
+    let t = Math.max(0, au.currentTime - 0.2);
+    if (i > 0) t = Math.max(t, starts[i - 1] + 0.3);
+    starts[i] = Math.round(t * 100) / 100;
+    for (let k = i + 1; k < starts.length; k++) if (starts[k] <= starts[k - 1]) starts[k] = starts[k - 1] + 0.3;
+    for (let k = 0; k < starts.length; k++) ends[k] = k < starts.length - 1 ? starts[k + 1] : (ep.end || 1e9);
+    sEls[i].classList.add('marked'); setTimeout(() => sEls[i].classList.remove('marked'), 600);
+    cur = -2; setCur(idxAt(au.currentTime));
+  };
+
   // cliques: frase / palavra
   const pop = $('#pop');
   const showPop = el => {
@@ -413,9 +444,10 @@ async function viewReader(id) {
     const pb = e.target.closest('#pop button');
     if (pb) { toggleKnown(pb.dataset.k); pop.style.display = 'none'; return; }
     const w = e.target.closest('.w');
-    if (w && st.gloss) { e.stopPropagation(); showPop(w); return; }
+    if (w && st.gloss && !adjust) { e.stopPropagation(); showPop(w); return; }
     if (!e.target.closest('#pop')) pop.style.display = 'none';
     const s = e.target.closest('.s');
+    if (s && adjust) { markStart(+s.dataset.i); return; }
     if (s) { if (st.listen) s.classList.toggle('peek'); playFrom(+s.dataset.i); }
   };
   document.addEventListener('click', onClick, true);
@@ -430,6 +462,7 @@ async function viewReader(id) {
   document.addEventListener('visibilitychange', onHide);
 
   leaveCurrent = () => {
+    if (adjust && backup) { starts.splice(0, starts.length, ...backup); ep.starts = backup; }
     persist(); au.pause();
     au.removeEventListener('timeupdate', onTime); au.removeEventListener('loadedmetadata', onMeta);
     au.removeEventListener('ended', onEnded); au.removeEventListener('play', onPlay); au.removeEventListener('pause', onPause);
@@ -542,12 +575,25 @@ function viewCards() {
 }
 
 /* ---------------- settings ---------------- */
+async function exportEpisode(id) {
+  const ep = S.episodes.find(e => e.id === id); const blob = await db.get('audio', id);
+  if (!ep) return;
+  toast('A preparar o ficheiro…');
+  const data = { ...ep, audio: blob ? { mime: blob.type || 'audio/mpeg', data: await fileToB64(blob) } : undefined };
+  delete data.imported;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(data)], { type: 'application/json' }));
+  a.download = `${(ep.episode ? String(ep.episode).padStart(2, '0') + '-' : '') + slug(ep.title) || 'episodio'}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
 async function viewSettings() {
   document.body.classList.add('has-nav');
   let est = '';
   try { const e = await navigator.storage.estimate(); est = `${(e.usage / 1e6).toFixed(1)} MB usados`; } catch (e) {}
   let persisted = false; try { persisted = await navigator.storage.persisted(); } catch (e) {}
   const st = S.settings;
+  const hasKey = !!(await db.get('kv', 'apikey'));
   $('#app').innerHTML = `<div class="wrap">
     <div class="top"><div><div class="kicker">Graded Readers Español · ${VERSION}</div><h1>Definições</h1></div></div>
     <div class="card">
@@ -556,14 +602,24 @@ async function viewSettings() {
       <div class="set"><div class="l"><b>Tamanho do texto</b><span id="fsv">${st.fs}px</span></div>
         <div class="fsz"><button data-fs="-1" aria-label="Diminuir">A−</button><button data-fs="1" aria-label="Aumentar">A+</button></div></div>
     </div>
+    <div class="sec">Criação automática (Claude API)</div>
+    <div class="card" style="margin-top:10px">
+      <label class="field"><b>Chave da API</b><span class="muted" style="font-size:13px">Cria-a em console.anthropic.com → API Keys. Fica guardada só neste dispositivo.</span>
+        <div class="keyrow"><input type="password" id="kIn" placeholder="${hasKey ? 'Chave guardada ✓' : 'sk-ant-…'}" autocomplete="off"><button class="btn" data-act="savekey">Guardar</button></div></label>
+      ${hasKey ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px"><button class="btn" data-act="testkey">Testar chave</button><button class="btn danger" data-act="delkey">Apagar chave</button></div>` : ''}
+      <div class="set" style="margin-top:8px"><div class="l"><b>Modelo</b><span>Quem prepara os episódios</span></div>
+        <select id="mSel">${MODELS.map(([v, l]) => `<option value="${v}" ${st.model === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+      <div class="set"><div class="l"><b>Traduções em</b></div>
+        <div class="seg">${[['pt-PT', 'Português PT'], ['pt-BR', 'Português BR']].map(([k, l]) => `<button data-variant="${k}" aria-pressed="${(st.variant || 'pt-PT') === k}">${l}</button>`).join('')}</div></div>
+    </div>
     <div class="sec">Episódios neste dispositivo</div>
     <div class="card" style="margin-top:10px">
-      ${S.episodes.length ? S.episodes.map(ep => `<div class="set"><div class="l"><b>${esc(ep.title)}</b><span>${esc(ep.series || '')}</span></div><button class="btn danger" data-del="${esc(ep.id)}">Apagar</button></div>`).join('') : '<p class="muted" style="margin:0">Ainda não importaste nenhum.</p>'}
+      ${S.episodes.length ? S.episodes.map(ep => `<div class="set"><div class="l"><b>${esc(ep.title)}</b><span>${esc(ep.series || '')}</span></div><div style="display:flex;gap:6px"><button class="btn" data-exp="${esc(ep.id)}">Exportar</button><button class="btn danger" data-del="${esc(ep.id)}">Apagar</button></div></div>`).join('') : '<p class="muted" style="margin:0">Ainda não importaste nenhum.</p>'}
       <div class="set"><div class="l"><b>Armazenamento</b><span>${esc(est)}${persisted ? ' · protegido contra limpeza automática' : ''}</span></div><button class="btn" data-act="import">${icons.plus} Importar</button></div>
     </div>
     <div class="sec">Sincronizar entre PC e telemóvel</div>
     <div class="card" style="margin-top:10px">
-      <p style="margin-top:0" class="muted">Os episódios e o progresso ficam só neste dispositivo. Para passar o progresso (palavras que sabes, onde ficaste) para outro, exporta aqui e importa o ficheiro no outro dispositivo pelo botão Importar.</p>
+      <p style="margin-top:0" class="muted">Tudo fica só neste dispositivo. Para passar um episódio criado no PC para o telemóvel, usa «Exportar» ao lado do episódio e importa o ficheiro no outro dispositivo. Para o progresso (onde ficaste, palavras que sabes), usa o botão abaixo.</p>
       <button class="btn" data-act="backup">Exportar progresso</button>
     </div>
     <div class="sec">Instalar como app</div>
@@ -576,6 +632,7 @@ async function viewSettings() {
       <p class="muted" style="margin-bottom:0">Depois de instalada, abre sem internet. Importa os episódios dentro da app instalada (no iPhone a app e o Safari guardam dados em separado).</p>
     </div>
     <div style="height:24px"></div></div>${bottomNav('set')}`;
+  $('#mSel').onchange = e => { st.model = e.target.value; saveKV('settings'); };
   $('#app').onclick = async e => {
     const t = e.target.closest('[data-theme]'); if (t) { st.theme = t.dataset.theme; applySettings(); saveKV('settings'); viewSettings(); return; }
     const f = e.target.closest('[data-fs]'); if (f) { st.fs = Math.max(15, Math.min(28, st.fs + +f.dataset.fs)); applySettings(); saveKV('settings'); $('#fsv').textContent = st.fs + 'px'; return; }
@@ -586,6 +643,18 @@ async function viewSettings() {
     }
     if (e.target.closest('[data-act=import]')) pickFiles();
     if (e.target.closest('[data-act=backup]')) exportBackup();
+    const x = e.target.closest('[data-exp]'); if (x) { exportEpisode(x.dataset.exp); return; }
+    const vb = e.target.closest('[data-variant]'); if (vb) { st.variant = vb.dataset.variant; saveKV('settings'); viewSettings(); return; }
+    if (e.target.closest('[data-act=savekey]')) {
+      const v = $('#kIn').value.trim(); if (!v) return toast('Cola a chave primeiro');
+      if (!v.startsWith('sk-')) return toast('Isto não parece uma chave da API (começa por sk-ant-)');
+      await db.put('kv', v, 'apikey'); toast('Chave guardada'); viewSettings(); return;
+    }
+    if (e.target.closest('[data-act=delkey]') && confirm('Apagar a chave deste dispositivo?')) { await db.del('kv', 'apikey'); viewSettings(); return; }
+    if (e.target.closest('[data-act=testkey]')) {
+      toast('A testar…');
+      try { await testKey(await db.get('kv', 'apikey'), st.model); toast('A chave funciona ✓'); } catch (err) { toast(err.message, 5000); }
+    }
   };
 }
 
